@@ -8,7 +8,8 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <cuda.h>
-#include <cutil.h>
+//#include <cutil.h>
+#include <helper_timer.h>
 #include "common.h"
 
 #define MAX_THREADS_PER_BLOCK 128
@@ -23,12 +24,27 @@ typedef struct {
 	unsigned const char *hash;
 } testvector;
 
+#define CUT_SAFE_CALL( call)                                              \
+   if( true != call) {                                                   \
+       fprintf(stderr, "Cut error in file '%s' in line %i.\n",              \
+               __FILE__, __LINE__);                                         \
+       exit(EXIT_FAILURE);                                                  \
+   }
+
+
+#define CUT_CHECK_ERROR(strout) \
+	if (CUDA_SUCCESS!=cudaGetLastError()) {	\
+		fprintf(stderr, "Cut error in file '%s' in line %i. ---------> %s\n",              \
+               __FILE__, __LINE__, strout);                                         \
+       exit(EXIT_FAILURE);                                                  \
+	}
+
 
 typedef struct {
-	unsigned int kernel_timer;	/* time spent in kernel */
-	unsigned int malloc_timer;	/* how much time we spend allocating memory */
-	unsigned int memcpy_timer;	/* how much time we spend copying from host to device */
-	unsigned int free_timer;	/* how much time we spend releasing memory */
+	StopWatchInterface* kernel_timer;	/* time spent in kernel */
+	StopWatchInterface* malloc_timer;	/* how much time we spend allocating memory */
+	StopWatchInterface* memcpy_timer;	/* how much time we spend copying from host to device */
+	StopWatchInterface* free_timer;	/* how much time we spend releasing memory */
 } chronometer;
 
 /* timers used to check performance */
@@ -77,35 +93,35 @@ void sha1_gpu_global (unsigned char *input, unsigned long size, unsigned char *o
 	size_be = LETOBE32 (size * 8);
 
 	/* Allocate enough memory on the device */
-	CUT_SAFE_CALL (cutResetTimer (chmeter.malloc_timer));
-	CUT_SAFE_CALL (cutStartTimer (chmeter.malloc_timer));
+	CUT_SAFE_CALL (sdkResetTimer (&chmeter.malloc_timer));
+	CUT_SAFE_CALL (sdkStartTimer (&chmeter.malloc_timer));
 	cudaMalloc ((void**)&d_extended, proc * 80 * sizeof(unsigned long));
 	CUT_CHECK_ERROR ("d_extended malloc failed");
 	cudaMalloc ((void**)&d_message, size + pad + 8);
 	CUT_CHECK_ERROR ("d_message malloc failed");
 	cudaMalloc ((void**)&d_ctx, sizeof (sha1_gpu_context));
 	CUT_CHECK_ERROR ("d_ctx malloc failed");
-	CUT_SAFE_CALL (cutStopTimer (chmeter.malloc_timer));
-	CUT_SAFE_CALL (cutResetTimer (chmeter.memcpy_timer));
+	CUT_SAFE_CALL (sdkStopTimer (&chmeter.malloc_timer));
+	CUT_SAFE_CALL (sdkResetTimer (&chmeter.memcpy_timer));
 
 	/*
 	 * Copy the data from host to device and perform padding
 	 */
-	CUT_SAFE_CALL (cutStartTimer (chmeter.memcpy_timer));
+	CUT_SAFE_CALL (sdkStartTimer (&chmeter.memcpy_timer));
 	cudaMemcpy (d_ctx, &ctx, sizeof (sha1_gpu_context), cudaMemcpyHostToDevice);
 	cudaMemcpy (d_message, input, size, cudaMemcpyHostToDevice);
 	cudaMemset (d_message + size, 0x80, 1);
 	cudaMemset (d_message + size + 1, 0, pad + 7);
 	cudaMemcpy (d_message + size + pad + 4, &size_be, 4, cudaMemcpyHostToDevice);
-	CUT_SAFE_CALL (cutStopTimer (chmeter.memcpy_timer));
+	CUT_SAFE_CALL (sdkStopTimer (&chmeter.memcpy_timer));
 
 	/*
 	 * Run the algorithm
 	 */
 	i = 0;
 	k = total_datablocks / total_threads;
-	CUT_SAFE_CALL (cutResetTimer (chmeter.kernel_timer));
-	CUT_SAFE_CALL (cutStartTimer (chmeter.kernel_timer));
+	CUT_SAFE_CALL (sdkResetTimer (&chmeter.kernel_timer));
+	CUT_SAFE_CALL (sdkStartTimer (&chmeter.kernel_timer));
 	if (k - 1 > 0) {
 		/*
 		 * Kernel is executed multiple times and only one block in the grid is used.
@@ -124,26 +140,26 @@ void sha1_gpu_global (unsigned char *input, unsigned long size, unsigned char *o
 	sha1_kernel_global <<<blocks_per_grid, proc>>>(d_message + total_threads * i * 64, d_ctx, threads_per_block, d_extended);
 	CUT_CHECK_ERROR ("Kernel execution failed");
 
-	CUT_SAFE_CALL (cutStopTimer (chmeter.kernel_timer));
-	CUT_SAFE_CALL (cutStartTimer (chmeter.memcpy_timer));
+	CUT_SAFE_CALL (sdkStopTimer (&chmeter.kernel_timer));
+	CUT_SAFE_CALL (sdkStartTimer (&chmeter.memcpy_timer));
 	cudaMemcpy (&ctx, d_ctx, sizeof(sha1_gpu_context), cudaMemcpyDeviceToHost);
-	CUT_SAFE_CALL (cutStopTimer (chmeter.memcpy_timer));
+	CUT_SAFE_CALL (sdkStopTimer (&chmeter.memcpy_timer));
 
-	CUT_SAFE_CALL (cutStartTimer (chmeter.kernel_timer));
+	CUT_SAFE_CALL (sdkStartTimer (&chmeter.kernel_timer));
 	/* Put the hash value in the users' buffer */
 	PUT_UINT32_BE( ctx.state[0], output,  0 );
 	PUT_UINT32_BE( ctx.state[1], output,  4 );
 	PUT_UINT32_BE( ctx.state[2], output,  8 );
 	PUT_UINT32_BE( ctx.state[3], output, 12 );
 	PUT_UINT32_BE( ctx.state[4], output, 16 );
-	CUT_SAFE_CALL (cutStopTimer (chmeter.kernel_timer));
+	CUT_SAFE_CALL (sdkStopTimer (&chmeter.kernel_timer));
 
-	CUT_SAFE_CALL (cutResetTimer (chmeter.free_timer));
-	CUT_SAFE_CALL (cutStartTimer (chmeter.free_timer));
+	CUT_SAFE_CALL (sdkResetTimer (&chmeter.free_timer));
+	CUT_SAFE_CALL (sdkStartTimer (&chmeter.free_timer));
 	cudaFree (d_message);
 	cudaFree (d_ctx);
 	cudaFree (d_extended);
-	CUT_SAFE_CALL (cutStopTimer (chmeter.free_timer));
+	CUT_SAFE_CALL (sdkStopTimer (&chmeter.free_timer));
 }
 
 
@@ -166,10 +182,11 @@ int main(int argc, char *argv[])
 	printf ("SHA-1 HASH ALGORITHM BENCHMARK TEST\n");
 	printf ("===================================\n");
 
-	CUT_SAFE_CALL (cutCreateTimer ((unsigned int*)&chmeter.kernel_timer));
-	CUT_SAFE_CALL (cutCreateTimer ((unsigned int*)&chmeter.malloc_timer));
-	CUT_SAFE_CALL (cutCreateTimer ((unsigned int*)&chmeter.memcpy_timer));
-	CUT_SAFE_CALL (cutCreateTimer ((unsigned int*)&chmeter.free_timer));
+	auto ifuck = sdkCreateTimer(&chmeter.kernel_timer);
+	//CUT_SAFE_CALL (sdkCreateTimer(&chmeter.kernel_timer));
+	CUT_SAFE_CALL (sdkCreateTimer(&chmeter.malloc_timer));
+	CUT_SAFE_CALL (sdkCreateTimer(&chmeter.memcpy_timer));
+	CUT_SAFE_CALL (sdkCreateTimer(&chmeter.free_timer));
 
 	printf ("\nTesting algorithm correctness...\n");
 
@@ -199,24 +216,24 @@ int main(int argc, char *argv[])
 			return -1;
 		}
 
-		CUT_SAFE_CALL (cutResetTimer (chmeter.kernel_timer));
-		CUT_SAFE_CALL (cutStartTimer (chmeter.kernel_timer));
+		CUT_SAFE_CALL (sdkResetTimer (&chmeter.kernel_timer));
+		CUT_SAFE_CALL (sdkStartTimer (&chmeter.kernel_timer));
 		sha1_cpu (data, i, hash);
-		CUT_SAFE_CALL (cutStopTimer (chmeter.kernel_timer));
-		printf ("CPU\t%-10d%f\n", i, cutGetTimerValue (chmeter.kernel_timer));
+		CUT_SAFE_CALL (sdkStopTimer (&chmeter.kernel_timer));
+		printf ("CPU\t%-10d%f\n", i, sdkGetTimerValue(&chmeter.kernel_timer));
 
-		CUT_SAFE_CALL (cutResetTimer (chmeter.kernel_timer));
-		CUT_SAFE_CALL (cutResetTimer (chmeter.malloc_timer));
-		CUT_SAFE_CALL (cutResetTimer (chmeter.memcpy_timer));
-		CUT_SAFE_CALL (cutResetTimer (chmeter.free_timer));
+		CUT_SAFE_CALL (sdkResetTimer (&chmeter.kernel_timer));
+		CUT_SAFE_CALL (sdkResetTimer (&chmeter.malloc_timer));
+		CUT_SAFE_CALL (sdkResetTimer (&chmeter.memcpy_timer));
+		CUT_SAFE_CALL (sdkResetTimer (&chmeter.free_timer));
 		memset (hash, 0, 20);
 
 		sha1_gpu_global (data, i, hash, max_threads_per_block);
 		printf ("GPU\t%-10d%f\t%f\t%f\t%f\n", i,
-				cutGetTimerValue (chmeter.kernel_timer),
-				cutGetTimerValue (chmeter.memcpy_timer),
-				cutGetTimerValue (chmeter.malloc_timer),
-				cutGetTimerValue (chmeter.free_timer));
+			sdkGetTimerValue(&chmeter.kernel_timer),
+			sdkGetTimerValue(&chmeter.memcpy_timer),
+			sdkGetTimerValue(&chmeter.malloc_timer),
+			sdkGetTimerValue(&chmeter.free_timer));
 		free (data);
 	}
 
